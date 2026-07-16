@@ -1,9 +1,9 @@
-import sqlite3
+import psycopg2
 
 import streamlit as st
 
 from core.auth import eh_admin
-from core.queries import lista_clubes_completo, criar_clube, ajustar_saldo_clube, editar_clube, deletar_clube
+from core.queries import lista_clubes_completo, lista_clubes_por_folha_salarial, criar_clube, ajustar_saldo_clube, editar_clube, deletar_clube, cobrar_salarios
 from core.state import selecionar_liga_ativa
 
 liga_id, liga_nome = selecionar_liga_ativa()
@@ -24,7 +24,7 @@ if eh_admin():
                         criar_clube(nome, tecnico, saldo_inicial, liga_id)
                         st.success(f"Clube '{nome}' cadastrado em {liga_nome}!")
                         st.rerun()
-                    except sqlite3.IntegrityError:
+                    except psycopg2.IntegrityError:
                         st.error("J\u00e1 existe um clube com esse nome nesta liga.")
 else:
     st.info("Modo visualiza\u00e7\u00e3o: apenas administradores podem cadastrar, editar ou apagar clubes.")
@@ -61,7 +61,7 @@ if eh_admin() and not clubes.empty:
                         editar_clube(int(clube_edit_row["ID"]), novo_nome, novo_tecnico, novo_saldo)
                         st.success("Clube atualizado!")
                         st.rerun()
-                    except sqlite3.IntegrityError:
+                    except psycopg2.IntegrityError:
                         st.error("J\u00e1 existe um clube com esse nome nesta liga.")
 
     st.divider()
@@ -77,4 +77,27 @@ if eh_admin() and not clubes.empty:
             clube_del_id = int(clubes.loc[clubes["Nome"] == clube_del_nome, "ID"].iloc[0])
             deletar_clube(clube_del_id)
             st.success(f"Clube '{clube_del_nome}' apagado.")
+            st.rerun()
+
+    st.divider()
+    st.subheader("\U0001F4B8 Folha salarial")
+    folha = lista_clubes_por_folha_salarial(liga_id)
+    st.caption("Soma dos sal\u00e1rios do elenco atual de cada clube.")
+    st.dataframe(folha.style.format({"Folha Salarial": "R$ {:.2f}"}), use_container_width=True)
+
+    with st.expander("\U0001F4B0 Cobrar sal\u00e1rios (desconta do saldo de todos os clubes)"):
+        total_folha = float(folha["Folha Salarial"].sum()) if not folha.empty else 0.0
+        st.write(
+            f"Isso vai descontar do saldo de **cada clube** a soma dos sal\u00e1rios do elenco atual dele, "
+            f"e lan\u00e7ar no hist\u00f3rico financeiro como 'Pagamento de sal\u00e1rios'. "
+            f"Total que sai da liga inteira: **R$ {total_folha:,.2f}**."
+        )
+        st.warning("Essa a\u00e7\u00e3o n\u00e3o pode ser desfeita automaticamente (mas pode ser ajustada manualmente depois, clube por clube).")
+        confirmar_salario = st.checkbox("Sim, quero cobrar os sal\u00e1rios agora", key="confirma_cobranca_salario")
+        if st.button("Cobrar sal\u00e1rios de todos os clubes", disabled=not confirmar_salario):
+            qtd = cobrar_salarios(liga_id)
+            if qtd == 0:
+                st.info("Nenhum clube tem jogadores com sal\u00e1rio cadastrado.")
+            else:
+                st.success(f"Sal\u00e1rios cobrados de {qtd} clube(s)!")
             st.rerun()

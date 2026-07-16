@@ -85,6 +85,50 @@ def lista_clubes_completo(liga_id):
     )
 
 
+def lista_clubes_por_folha_salarial(liga_id):
+    """Folha salarial (soma dos salários do elenco) de cada clube, do mais
+    caro para o mais barato — é o que define o 'time mais caro da liga'."""
+    return df(
+        """
+        SELECT c.nome AS "Clube", COALESCE(SUM(j.salario), 0) AS "Folha Salarial"
+        FROM clubes c
+        LEFT JOIN jogadores j ON j.clube_id = c.id
+        WHERE c.liga_id = ?
+        GROUP BY c.id, c.nome
+        ORDER BY "Folha Salarial" DESC
+        """,
+        (liga_id,),
+    )
+
+
+def cobrar_salarios(liga_id):
+    """Desconta do saldo de cada clube a soma dos salários do seu elenco atual,
+    lançando um débito no financeiro para cada clube com folha > 0.
+    Retorna quantos clubes tiveram salário cobrado."""
+    conn = get_conn()
+    linhas = conn.execute(
+        """
+        SELECT c.id, COALESCE(SUM(j.salario), 0)
+        FROM clubes c
+        LEFT JOIN jogadores j ON j.clube_id = c.id
+        WHERE c.liga_id = ?
+        GROUP BY c.id
+        """,
+        (liga_id,),
+    ).fetchall()
+
+    cobrados = 0
+    for clube_id, total in linhas:
+        total = float(total or 0)
+        if total > 0:
+            registrar_lancamento(conn, clube_id, "Pagamento de salários", -total, "Salário")
+            cobrados += 1
+
+    conn.commit()
+    conn.close()
+    return cobrados
+
+
 def criar_clube(nome, tecnico, saldo_inicial, liga_id):
     conn = get_conn()
     try:
