@@ -536,3 +536,146 @@ def deletar_usuario(usuario_id):
     conn.execute("DELETE FROM usuarios WHERE id = ?", (usuario_id,))
     conn.commit()
     conn.close()
+
+
+# ----------------------------------------------------------------------
+# NEGOCIAÇÕES (Compra / Troca) — suportam transferência entre ligas
+# e aplicam a trava de 2 negociações por clube por dia
+# ----------------------------------------------------------------------
+
+LIMITE_NEGOCIACOES_POR_DIA = 2
+
+
+def lista_clubes_todas_ligas():
+    """Todos os clubes de todas as ligas, com o nome da liga junto —
+    usado no seletor de clubes quando a negociação é entre ligas."""
+    return df(
+        """
+        SELECT c.id AS "id", c.nome AS "nome", c.liga_id AS "liga_id", l.nome AS "liga_nome"
+        FROM clubes c
+        JOIN ligas l ON l.id = c.liga_id
+        ORDER BY l.nome, c.nome
+        """
+    )
+
+
+def lista_jogadores_por_clube(clube_id):
+    """Jogadores de UM clube específico, independente da liga em que o
+    clube está — necessário para montar negociações entre ligas."""
+    return df(
+        'SELECT id AS "id", nome AS "nome" FROM jogadores WHERE clube_id = ? ORDER BY nome',
+        (clube_id,),
+    )
+
+
+def contar_negociacoes_hoje(clube_id):
+    """Quantas negociações (compra ou troca) esse clube já participou hoje,
+    seja como clube_a ou clube_b."""
+    hoje = date.today().isoformat()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM negociacoes WHERE data = ? AND (clube_a_id = ? OR clube_b_id = ?)",
+        (hoje, clube_id, clube_id),
+    ).fetchone()
+    conn.close()
+    return row[0]
+
+
+def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compensacao=0, clube_pagador_id=None, clube_recebedor_id=None):
+    """Registra uma negociação (compra ou troca) entre dois clubes — inclusive
+    de ligas diferentes.
+
+    tipo: 'compra' ou 'troca'
+    clube_a_id / clube_b_id: os dois clubes envolvidos (para compra: vendedor e comprador)
+    movimentos: lista de tuplas (jogador_id, clube_origem_id, clube_destino_id) —
+                um item por jogador que muda de clube nesta negociação
+    valor_compensacao: valor pago por clube_pagador_id a clube_recebedor_id (>= 0)
+    clube_pagador_id / clube_recebedor_id: só usados se valor_compensacao > 0
+
+    Aplica a trava de LIMITE_NEGOCIACOES_POR_DIA por clube (considerando os
+    dois clubes da negociação) e move o(s) jogador(es) — inclusive de liga,
+    permitindo transferências entre ligas diferentes.
+    """
+    if not movimentos:
+        raise ValueError("Informe ao menos um jogador na negociação.")
+
+    for clube_id in {int(clube_a_id), int(clube_b_id)}:
+        usadas_hoje = contar_negociacoes_hoje(clube_id)
+        if usadas_hoje >= LIMITE_NEGOCIACOES_POR_DIA:
+            nome_df = df('SELECT nome AS "nome" FROM clubes WHERE id = ?', (clube_id,))
+            nome_clube = nome_df.iloc[0]["nome"] if not nome_df.empty else f"clube #{clube_id}"
+            raise ValueError(
+                f"O clube '{nome_clube}' já atingiu o limite de {LIMITE_NEGOCIACOES_POR_DIA} "
+                "transferências hoje. Tente novamente amanhã."
+            )
+
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "INSERT INTO negociacoes (tipo, clube_a_id, clube_b_id, valor_compensacao, data) VALUES (?,?,?,?,?) RETURNING id",
+            (tipo, clube_a_id, clube_b_id, valor_compensacao, date.today().isoformat()),
+        )
+        negociacao_id = cur.fetchone()[0]
+
+        for jogador_id, origem_id, destino_id in movimentos:
+            conn.execute(
+                "INSERT INTO negociacao_jogadores (negociacao_id, jogador_id, clube_origem_id, clube_destino_id) VALUES (?,?,?,?)",
+                (negociacao_id, jogador_id, origem_id, destino_id),
+            )
+            # Move o jogador de clube e TAMBÉM de liga (herda a liga do clube de destino) —
+            # é isso que permite a transferência funcionar entre ligas diferentes.
+            liga_row = conn.execute("SELECT liga_id FROM clubes WHERE id = ?", (destino_id,)).fetchone()
+            nova_liga_id = liga_row[0] if liga_row else None
+            conn.execute(
+                "UPDATE jogadores SET clube_id = ?, liga_id = ? WHERE id = ?",
+                (destino_id, nova_liga_id, jogador_id),
+            )
+
+        if valor_compensacao and valor_compensacao > 0 and clube_pagador_id and clube_recebedor_id:
+            registrar_lancamento(conn, clube_pagador_id, f"Negociação #{negociacao_id} ({tipo}) — pagamento", -valor_compensacao, "Transferência")
+            registrar_lancamento(conn, clube_recebedor_id, f"Negociação #{negociacao_id} ({tipo}) — recebimento", valor_compensacao, "Transferência")
+
+        conn.commit()
+        return negociacao_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def historico_negociacoes(liga_id):
+    """Negociações (compra/troca) que envolvem pelo menos um clube desta liga —
+    inclusive as que foram feitas com um clube de outra liga."""
+    return df(
+        """
+        SELECT n.id AS "ID", n.tipo AS "Tipo", n.data AS "Data",
+               ca.nome AS "Clube A", la.nome AS "Liga A",
+               cb.nome AS "Clube B", lb.nome AS "Liga B",
+               n.valor_compensacao AS "Valor"
+        FROM negociacoes n
+        JOIN clubes ca ON ca.id = n.clube_a_id
+        JOIN clubes cb ON cb.id = n.clube_b_id
+        LEFT JOIN ligas la ON la.id = ca.liga_id
+        LEFT JOIN ligas lb ON lb.id = cb.liga_id
+        WHERE ca.liga_id = ? OR cb.liga_id = ?
+        ORDER BY n.id DESC
+        """,
+        (liga_id, liga_id),
+    )
+
+
+def detalhes_negociacao(negociacao_id):
+    """Lista os jogadores movimentados dentro de uma negociação específica."""
+    return df(
+        """
+        SELECT j.nome AS "Jogador", co.nome AS "Saiu de", cd.nome AS "Foi para"
+        FROM negociacao_jogadores nj
+        JOIN jogadores j ON j.id = nj.jogador_id
+        LEFT JOIN clubes co ON co.id = nj.clube_origem_id
+        LEFT JOIN clubes cd ON cd.id = nj.clube_destino_id
+        WHERE nj.negociacao_id = ?
+        ORDER BY nj.id
+        """,
+        (negociacao_id,),
+    )

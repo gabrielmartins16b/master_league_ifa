@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from core.auth import eh_admin
@@ -8,11 +9,13 @@ liga_id, liga_nome = selecionar_liga_ativa()
 st.header(f"\U0001F464 Jogadores \u2014 {liga_nome}")
 clubes = lista_clubes(liga_id)
 
+POSICOES = ["GOL", "ZAG", "LAT", "VOL", "MEI", "ATA"]
+
 if eh_admin():
     with st.expander("\u2795 Registrar novo jogador"):
         with st.form("form_jogador"):
             nome = st.text_input("Nome do jogador")
-            posicao = st.selectbox("Posi\u00e7\u00e3o", ["GOL", "ZAG", "LAT", "VOL", "MEI", "ATA"])
+            posicao = st.selectbox("Posi\u00e7\u00e3o", POSICOES)
             overall = st.slider("Overall", 40, 99, 70)
             valor_mercado = st.number_input("Valor de mercado", min_value=0.0, step=50000.0)
             salario = st.number_input("Sal\u00e1rio", min_value=0.0, step=1000.0)
@@ -29,8 +32,59 @@ if eh_admin():
                     criar_jogador(nome, posicao, overall, valor_mercado, salario, clube_id, liga_id)
                     st.success(f"Jogador '{nome}' registrado em {liga_nome}!")
                     st.rerun()
+
+    with st.expander("\U0001F4CB Cadastrar v\u00e1rios jogadores de uma vez"):
+        st.caption(
+            "Preencha a tabela abaixo (clique em '+' pra adicionar linhas) ou **cole direto de uma "
+            "planilha do Excel/Google Sheets** — selecione as células lá, copie (Ctrl+C), clique numa "
+            "célula aqui e cole (Ctrl+V). Depois clique em 'Salvar todos'."
+        )
+        clube_opcoes_lote = ["(Sem clube / Free agent)"] + (clubes["nome"].tolist() if not clubes.empty else [])
+
+        modelo = pd.DataFrame(
+            [{"Nome": "", "Posição": "MEI", "Overall": 70, "Valor de Mercado": 0.0, "Salário": 0.0, "Clube": clube_opcoes_lote[0]}]
+        )
+        tabela = st.data_editor(
+            modelo,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="editor_lote_jogadores",
+            column_config={
+                "Posição": st.column_config.SelectboxColumn("Posição", options=POSICOES),
+                "Overall": st.column_config.NumberColumn("Overall", min_value=40, max_value=99, step=1),
+                "Valor de Mercado": st.column_config.NumberColumn("Valor de Mercado", min_value=0.0, step=50000.0, format="R$ %.2f"),
+                "Salário": st.column_config.NumberColumn("Salário", min_value=0.0, step=1000.0, format="R$ %.2f"),
+                "Clube": st.column_config.SelectboxColumn("Clube", options=clube_opcoes_lote),
+            },
+        )
+
+        if st.button("Salvar todos"):
+            linhas_validas = tabela[tabela["Nome"].fillna("").str.strip() != ""]
+            if linhas_validas.empty:
+                st.warning("Nenhuma linha com nome preenchido pra salvar.")
+            else:
+                criados = 0
+                for _, linha in linhas_validas.iterrows():
+                    clube_id = None
+                    clube_nome_linha = linha.get("Clube")
+                    if clube_nome_linha and clube_nome_linha != "(Sem clube / Free agent)":
+                        match = clubes[clubes["nome"] == clube_nome_linha]
+                        if not match.empty:
+                            clube_id = int(match.iloc[0]["id"])
+                    criar_jogador(
+                        str(linha["Nome"]).strip(),
+                        linha.get("Posição") or "MEI",
+                        int(linha.get("Overall") or 70),
+                        float(linha.get("Valor de Mercado") or 0),
+                        float(linha.get("Salário") or 0),
+                        clube_id,
+                        liga_id,
+                    )
+                    criados += 1
+                st.success(f"{criados} jogador(es) cadastrado(s)!")
+                st.rerun()
 else:
-    st.info("Modo visualiza\u00e7\u00e3o: escolha um clube abaixo para ver o elenco dele.")
+    st.info("Modo visualização: escolha um clube abaixo para ver o elenco dele.")
 
 st.subheader("Elenco")
 filtro_clube = st.selectbox(
