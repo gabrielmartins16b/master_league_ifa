@@ -48,7 +48,7 @@ else:
     else:
         tipo = st.radio("Tipo de negocia\u00e7\u00e3o", ["Compra", "Troca"], horizontal=True)
 
-        st.caption(f"Limite: cada clube pode participar de no m\u00e1ximo 2 negocia\u00e7\u00f5es por dia.")
+        st.caption("Limite: cada clube pode participar de no m\u00e1ximo 2 negocia\u00e7\u00f5es por rodada. Novas rodadas come\u00e7am \u00e0s 22h (hor\u00e1rio de Bras\u00edlia).")
 
         if tipo == "Compra":
             col1, col2 = st.columns(2)

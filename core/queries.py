@@ -4,7 +4,7 @@ Nenhuma página deve montar SQL diretamente — tudo passa por aqui.
 """
 
 import psycopg2
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -543,7 +543,50 @@ def deletar_usuario(usuario_id):
 # e aplicam a trava de 2 negociações por clube por dia
 # ----------------------------------------------------------------------
 
-LIMITE_NEGOCIACOES_POR_DIA = 2
+LIMITE_NEGOCIACOES_POR_RODADA = 2
+
+# Horário de Brasília fixado (UTC-3) — o Brasil não tem mais horário de verão
+# desde 2019, então esse deslocamento é preciso o ano inteiro. Usar um fuso
+# fixo aqui significa que a trava funciona corretamente não importa em qual
+# fuso horário o servidor (Streamlit Cloud) esteja rodando.
+_BRASILIA = timezone(timedelta(hours=-3))
+_HORA_INICIO_RODADA = 22  # novas rodadas começam às 22h (Brasília)
+
+
+def _inicio_rodada_atual():
+    """Retorna o instante (com fuso de Brasília) em que a rodada atual
+    começou. Rodadas sempre começam às 22h — se ainda não passou das 22h
+    hoje, a rodada atual começou às 22h de ONTEM."""
+    agora = datetime.now(_BRASILIA)
+    inicio_hoje = agora.replace(hour=_HORA_INICIO_RODADA, minute=0, second=0, microsecond=0)
+    if agora >= inicio_hoje:
+        return inicio_hoje
+    return inicio_hoje - timedelta(days=1)
+
+
+def contar_negociacoes_hoje(clube_id):
+    """Quantas negociações (compra ou troca) esse clube já fez NA RODADA
+    ATUAL — ou seja, desde as 22h (Brasília) mais recentes — seja como
+    clube_a ou clube_b."""
+    inicio_rodada = _inicio_rodada_atual()
+    conn = get_conn()
+    linhas = conn.execute(
+        "SELECT data FROM negociacoes WHERE clube_a_id = ? OR clube_b_id = ?",
+        (clube_id, clube_id),
+    ).fetchall()
+    conn.close()
+
+    count = 0
+    for (data_str,) in linhas:
+        try:
+            dt = datetime.fromisoformat(data_str)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_BRASILIA)
+        if dt >= inicio_rodada:
+            count += 1
+    return count
 
 
 def lista_clubes_todas_ligas():
@@ -568,19 +611,6 @@ def lista_jogadores_por_clube(clube_id):
     )
 
 
-def contar_negociacoes_hoje(clube_id):
-    """Quantas negociações (compra ou troca) esse clube já participou hoje,
-    seja como clube_a ou clube_b."""
-    hoje = date.today().isoformat()
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT COUNT(*) FROM negociacoes WHERE data = ? AND (clube_a_id = ? OR clube_b_id = ?)",
-        (hoje, clube_id, clube_id),
-    ).fetchone()
-    conn.close()
-    return row[0]
-
-
 def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compensacao=0, clube_pagador_id=None, clube_recebedor_id=None):
     """Registra uma negociação (compra ou troca) entre dois clubes — inclusive
     de ligas diferentes.
@@ -592,7 +622,7 @@ def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compens
     valor_compensacao: valor pago por clube_pagador_id a clube_recebedor_id (>= 0)
     clube_pagador_id / clube_recebedor_id: só usados se valor_compensacao > 0
 
-    Aplica a trava de LIMITE_NEGOCIACOES_POR_DIA por clube (considerando os
+    Aplica a trava de LIMITE_NEGOCIACOES_POR_RODADA por clube (considerando os
     dois clubes da negociação) e move o(s) jogador(es) — inclusive de liga,
     permitindo transferências entre ligas diferentes.
     """
@@ -600,20 +630,21 @@ def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compens
         raise ValueError("Informe ao menos um jogador na negociação.")
 
     for clube_id in {int(clube_a_id), int(clube_b_id)}:
-        usadas_hoje = contar_negociacoes_hoje(clube_id)
-        if usadas_hoje >= LIMITE_NEGOCIACOES_POR_DIA:
+        usadas_na_rodada = contar_negociacoes_hoje(clube_id)
+        if usadas_na_rodada >= LIMITE_NEGOCIACOES_POR_RODADA:
             nome_df = df('SELECT nome AS "nome" FROM clubes WHERE id = ?', (clube_id,))
             nome_clube = nome_df.iloc[0]["nome"] if not nome_df.empty else f"clube #{clube_id}"
             raise ValueError(
-                f"O clube '{nome_clube}' já atingiu o limite de {LIMITE_NEGOCIACOES_POR_DIA} "
-                "transferências hoje. Tente novamente amanhã."
+                f"O clube '{nome_clube}' já atingiu o limite de {LIMITE_NEGOCIACOES_POR_RODADA} "
+                "transferências para esta rodada. Só é possível negociar de novo depois "
+                "que a próxima rodada começar (22h)."
             )
 
     conn = get_conn()
     try:
         cur = conn.execute(
             "INSERT INTO negociacoes (tipo, clube_a_id, clube_b_id, valor_compensacao, data) VALUES (?,?,?,?,?) RETURNING id",
-            (tipo, clube_a_id, clube_b_id, valor_compensacao, date.today().isoformat()),
+            (tipo, clube_a_id, clube_b_id, valor_compensacao, datetime.now(_BRASILIA).isoformat()),
         )
         negociacao_id = cur.fetchone()[0]
 

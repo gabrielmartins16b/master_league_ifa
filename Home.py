@@ -31,11 +31,19 @@ st.markdown(
             flex: 1 1 100% !important;
         }
     }
+
+    /* Esconde o menu "⋮" padrão do Streamlit e o rodapé "Made with Streamlit".
+       Não esconde o <header> inteiro de propósito: ele contém o botão ☰ que
+       abre a sidebar no celular — escondê-lo quebraria a navegação mobile. */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    [data-testid="stToolbar"] {visibility: hidden !important;}
+    [data-testid="stDecoration"] {visibility: hidden !important;}
     </style>
     """,
     unsafe_allow_html=True,
 )
- 
+
 # --- Gate de login: enquanto nao autenticado, so isso existe na tela ---
 if not usuario_logado() or not papel_logado():
     tela_login()
