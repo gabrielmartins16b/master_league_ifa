@@ -567,11 +567,11 @@ def _inicio_rodada_atual():
 def contar_negociacoes_hoje(clube_id):
     """Quantas negociações (compra ou troca) esse clube já fez NA RODADA
     ATUAL — ou seja, desde as 22h (Brasília) mais recentes — seja como
-    clube_a ou clube_b."""
+    clube_a ou clube_b. Negociações canceladas não contam para o limite."""
     inicio_rodada = _inicio_rodada_atual()
     conn = get_conn()
     linhas = conn.execute(
-        "SELECT data FROM negociacoes WHERE clube_a_id = ? OR clube_b_id = ?",
+        "SELECT data FROM negociacoes WHERE (clube_a_id = ? OR clube_b_id = ?) AND status = 'ativa'",
         (clube_id, clube_id),
     ).fetchall()
     conn.close()
@@ -611,7 +611,10 @@ def lista_jogadores_por_clube(clube_id):
     )
 
 
-def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compensacao=0, clube_pagador_id=None, clube_recebedor_id=None):
+def registrar_negociacao(
+    tipo, clube_a_id, clube_b_id, movimentos, valor_compensacao=0,
+    clube_pagador_id=None, clube_recebedor_id=None, ignorar_limite=False,
+):
     """Registra uma negociação (compra ou troca) entre dois clubes — inclusive
     de ligas diferentes.
 
@@ -621,30 +624,37 @@ def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compens
                 um item por jogador que muda de clube nesta negociação
     valor_compensacao: valor pago por clube_pagador_id a clube_recebedor_id (>= 0)
     clube_pagador_id / clube_recebedor_id: só usados se valor_compensacao > 0
+    ignorar_limite: se True, pula a trava de negociações por rodada (uso
+                    administrativo, para corrigir erro do próprio admin) —
+                    fica registrado como "Exceção" no histórico, para auditoria
 
-    Aplica a trava de LIMITE_NEGOCIACOES_POR_RODADA por clube (considerando os
-    dois clubes da negociação) e move o(s) jogador(es) — inclusive de liga,
+    Aplica a trava de LIMITE_NEGOCIACOES_POR_RODADA por clube (a menos que
+    ignorar_limite=True) e move o(s) jogador(es) — inclusive de liga,
     permitindo transferências entre ligas diferentes.
     """
     if not movimentos:
         raise ValueError("Informe ao menos um jogador na negociação.")
 
-    for clube_id in {int(clube_a_id), int(clube_b_id)}:
-        usadas_na_rodada = contar_negociacoes_hoje(clube_id)
-        if usadas_na_rodada >= LIMITE_NEGOCIACOES_POR_RODADA:
-            nome_df = df('SELECT nome AS "nome" FROM clubes WHERE id = ?', (clube_id,))
-            nome_clube = nome_df.iloc[0]["nome"] if not nome_df.empty else f"clube #{clube_id}"
-            raise ValueError(
-                f"O clube '{nome_clube}' já atingiu o limite de {LIMITE_NEGOCIACOES_POR_RODADA} "
-                "transferências para esta rodada. Só é possível negociar de novo depois "
-                "que a próxima rodada começar (22h)."
-            )
+    if not ignorar_limite:
+        for clube_id in {int(clube_a_id), int(clube_b_id)}:
+            usadas_na_rodada = contar_negociacoes_hoje(clube_id)
+            if usadas_na_rodada >= LIMITE_NEGOCIACOES_POR_RODADA:
+                nome_df = df('SELECT nome AS "nome" FROM clubes WHERE id = ?', (clube_id,))
+                nome_clube = nome_df.iloc[0]["nome"] if not nome_df.empty else f"clube #{clube_id}"
+                raise ValueError(
+                    f"O clube '{nome_clube}' já atingiu o limite de {LIMITE_NEGOCIACOES_POR_RODADA} "
+                    "transferências para esta rodada. Só é possível negociar de novo depois "
+                    "que a próxima rodada começar (22h), ou marque a exceção administrativa."
+                )
 
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO negociacoes (tipo, clube_a_id, clube_b_id, valor_compensacao, data) VALUES (?,?,?,?,?) RETURNING id",
-            (tipo, clube_a_id, clube_b_id, valor_compensacao, datetime.now(_BRASILIA).isoformat()),
+            """INSERT INTO negociacoes
+               (tipo, clube_a_id, clube_b_id, valor_compensacao, data, clube_pagador_id, clube_recebedor_id, excecao)
+               VALUES (?,?,?,?,?,?,?,?) RETURNING id""",
+            (tipo, clube_a_id, clube_b_id, valor_compensacao, datetime.now(_BRASILIA).isoformat(),
+             clube_pagador_id, clube_recebedor_id, bool(ignorar_limite)),
         )
         negociacao_id = cur.fetchone()[0]
 
@@ -675,6 +685,48 @@ def registrar_negociacao(tipo, clube_a_id, clube_b_id, movimentos, valor_compens
         conn.close()
 
 
+def cancelar_negociacao(negociacao_id):
+    """Anula uma negociação (compra ou troca): devolve cada jogador ao clube
+    (e liga) de origem, estorna a compensação financeira se houver, e marca
+    a negociação como 'cancelada' — ela deixa de contar para a trava de
+    limite por rodada, mas continua visível no histórico para auditoria."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT tipo, valor_compensacao, clube_pagador_id, clube_recebedor_id, status FROM negociacoes WHERE id = ?",
+        (negociacao_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return
+    tipo, valor_compensacao, pagador_id, recebedor_id, status = row
+    if status == "cancelada":
+        conn.close()
+        return
+
+    movimentos = conn.execute(
+        "SELECT jogador_id, clube_origem_id, clube_destino_id FROM negociacao_jogadores WHERE negociacao_id = ?",
+        (negociacao_id,),
+    ).fetchall()
+
+    for jogador_id, origem_id, destino_id in movimentos:
+        liga_origem_id = None
+        if origem_id is not None:
+            liga_row = conn.execute("SELECT liga_id FROM clubes WHERE id = ?", (origem_id,)).fetchone()
+            liga_origem_id = liga_row[0] if liga_row else None
+        conn.execute(
+            "UPDATE jogadores SET clube_id = ?, liga_id = ? WHERE id = ?",
+            (origem_id, liga_origem_id, jogador_id),
+        )
+
+    if valor_compensacao and valor_compensacao > 0 and pagador_id and recebedor_id:
+        registrar_lancamento(conn, pagador_id, f"Estorno — negociação #{negociacao_id} anulada", valor_compensacao, "Estorno")
+        registrar_lancamento(conn, recebedor_id, f"Estorno — negociação #{negociacao_id} anulada", -valor_compensacao, "Estorno")
+
+    conn.execute("UPDATE negociacoes SET status = 'cancelada' WHERE id = ?", (negociacao_id,))
+    conn.commit()
+    conn.close()
+
+
 def historico_negociacoes(liga_id):
     """Negociações (compra/troca) que envolvem pelo menos um clube desta liga —
     inclusive as que foram feitas com um clube de outra liga."""
@@ -683,7 +735,9 @@ def historico_negociacoes(liga_id):
         SELECT n.id AS "ID", n.tipo AS "Tipo", n.data AS "Data",
                ca.nome AS "Clube A", la.nome AS "Liga A",
                cb.nome AS "Clube B", lb.nome AS "Liga B",
-               n.valor_compensacao AS "Valor"
+               n.valor_compensacao AS "Valor",
+               n.status AS "Status",
+               CASE WHEN n.excecao THEN 'Sim' ELSE 'Não' END AS "Exceção"
         FROM negociacoes n
         JOIN clubes ca ON ca.id = n.clube_a_id
         JOIN clubes cb ON cb.id = n.clube_b_id
@@ -709,4 +763,31 @@ def detalhes_negociacao(negociacao_id):
         ORDER BY nj.id
         """,
         (negociacao_id,),
+    )
+
+
+# ----------------------------------------------------------------------
+# MULTAS
+# ----------------------------------------------------------------------
+
+def aplicar_multa(clube_id, valor, motivo):
+    """Aplica uma multa a um clube: desconta o valor do saldo e registra
+    no livro financeiro sob a categoria 'Multa', com o motivo informado."""
+    conn = get_conn()
+    registrar_lancamento(conn, clube_id, f"Multa: {motivo}" if motivo else "Multa", -abs(valor), "Multa")
+    conn.commit()
+    conn.close()
+
+
+def historico_multas(liga_id):
+    """Todas as multas aplicadas a clubes desta liga, mais recentes primeiro."""
+    return df(
+        """
+        SELECT f.data AS "Data", c.nome AS "Clube", f.descricao AS "Motivo", f.valor AS "Valor"
+        FROM financeiro f
+        JOIN clubes c ON c.id = f.clube_id
+        WHERE c.liga_id = ? AND f.categoria = 'Multa'
+        ORDER BY f.id DESC
+        """,
+        (liga_id,),
     )

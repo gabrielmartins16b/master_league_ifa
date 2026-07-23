@@ -172,6 +172,10 @@ def init_db():
     cur.execute("ALTER TABLE clubes ADD COLUMN IF NOT EXISTS liga_id BIGINT REFERENCES ligas(id)")
     cur.execute("ALTER TABLE jogadores ADD COLUMN IF NOT EXISTS liga_id BIGINT REFERENCES ligas(id)")
     cur.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS clube_id BIGINT REFERENCES clubes(id)")
+    cur.execute("ALTER TABLE negociacoes ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ativa'")
+    cur.execute("ALTER TABLE negociacoes ADD COLUMN IF NOT EXISTS clube_pagador_id BIGINT REFERENCES clubes(id)")
+    cur.execute("ALTER TABLE negociacoes ADD COLUMN IF NOT EXISTS clube_recebedor_id BIGINT REFERENCES clubes(id)")
+    cur.execute("ALTER TABLE negociacoes ADD COLUMN IF NOT EXISTS excecao BOOLEAN NOT NULL DEFAULT false")
     conn.commit()
 
     # Se existem clubes órfãos (liga_id nulo) de uma versão antiga sem ligas,

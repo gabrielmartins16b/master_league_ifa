@@ -3,7 +3,10 @@ import psycopg2
 import streamlit as st
 
 from core.auth import eh_admin
-from core.queries import lista_clubes_completo, lista_clubes_por_folha_salarial, criar_clube, ajustar_saldo_clube, editar_clube, deletar_clube, cobrar_salarios
+from core.queries import (
+    lista_clubes_completo, lista_clubes_por_folha_salarial, criar_clube, ajustar_saldo_clube,
+    editar_clube, deletar_clube, cobrar_salarios, aplicar_multa, historico_multas,
+)
 from core.state import selecionar_liga_ativa
 
 liga_id, liga_nome = selecionar_liga_ativa()
@@ -101,3 +104,26 @@ if eh_admin() and not clubes.empty:
             else:
                 st.success(f"Sal\u00e1rios cobrados de {qtd} clube(s)!")
             st.rerun()
+
+    st.divider()
+    st.subheader("\U0001F6A8 Multas")
+    with st.expander("\U0001F6A8 Aplicar multa a um clube"):
+        clube_multa_nome = st.selectbox("Clube", clubes["Nome"], key="multa_clube")
+        valor_multa = st.number_input("Valor da multa", min_value=0.0, step=10000.0, key="multa_valor")
+        motivo_multa = st.text_input("Motivo da multa", key="multa_motivo", placeholder="Ex: atraso no jogo, WO, conduta antidesportiva...")
+        if st.button("Aplicar multa"):
+            if valor_multa <= 0:
+                st.error("Informe um valor de multa maior que zero.")
+            elif not motivo_multa.strip():
+                st.error("Informe o motivo da multa.")
+            else:
+                clube_multa_id = int(clubes.loc[clubes["Nome"] == clube_multa_nome, "ID"].iloc[0])
+                aplicar_multa(clube_multa_id, valor_multa, motivo_multa)
+                st.success(f"Multa de R$ {valor_multa:,.2f} aplicada a {clube_multa_nome}!")
+                st.rerun()
+
+    multas = historico_multas(liga_id)
+    if multas.empty:
+        st.caption("Nenhuma multa aplicada ainda nesta liga.")
+    else:
+        st.dataframe(multas.style.format({"Valor": "R$ {:.2f}"}), use_container_width=True)

@@ -6,6 +6,7 @@ from core.queries import (
     lista_clubes_todas_ligas,
     lista_jogadores_por_clube,
     registrar_negociacao,
+    cancelar_negociacao,
     historico_negociacoes,
     detalhes_negociacao,
     historico_transferencias as historico_transferencias_legado,
@@ -14,7 +15,7 @@ from core.state import selecionar_liga_ativa
 
 liga_id, liga_nome = selecionar_liga_ativa()
 st.header(f"\U0001F504 Transfer\u00eancias \u2014 {liga_nome}")
-st.warning("🧪 TESTE DE VERSÃO — CARIMBO 001")
+
 
 def _opcoes_clube(entre_ligas):
     """Retorna (lista_de_rotulos, dict rotulo->id, dict rotulo->liga_id)."""
@@ -50,6 +51,13 @@ else:
 
         st.caption("Limite: cada clube pode participar de no m\u00e1ximo 2 negocia\u00e7\u00f5es por rodada. Novas rodadas come\u00e7am \u00e0s 22h (hor\u00e1rio de Bras\u00edlia).")
 
+        excecao = st.checkbox(
+            "\u26a0\ufe0f Exce\u00e7\u00e3o administrativa: ignorar o limite de 2 por rodada",
+            help="Use apenas se precisar corrigir um erro seu e realizar uma 3\u00aa (ou mais) transfer\u00eancia na mesma rodada. Fica registrado no hist\u00f3rico como exce\u00e7\u00e3o.",
+        )
+        if excecao:
+            st.caption("\u26a0\ufe0f Esta negocia\u00e7\u00e3o vai ignorar a trava de limite e ficar marcada como 'Exce\u00e7\u00e3o' no hist\u00f3rico.")
+
         if tipo == "Compra":
             col1, col2 = st.columns(2)
             with col1:
@@ -78,6 +86,7 @@ else:
                             registrar_negociacao(
                                 "compra", vendedor_id, comprador_id, movimentos,
                                 valor_compensacao=valor, clube_pagador_id=comprador_id, clube_recebedor_id=vendedor_id,
+                                ignorar_limite=excecao,
                             )
                             st.success(f"{len(jogadores_sel)} jogador(es) comprado(s) por {rotulo_comprador}!")
                             st.rerun()
@@ -136,6 +145,7 @@ else:
                         registrar_negociacao(
                             "troca", clube_a_id, clube_b_id, movimentos,
                             valor_compensacao=valor_compensacao, clube_pagador_id=pagador_id, clube_recebedor_id=recebedor_id,
+                            ignorar_limite=excecao,
                         )
                         st.success(f"Troca entre {rotulo_a} e {rotulo_b} registrada!")
                         st.rerun()
@@ -155,9 +165,27 @@ else:
             "#" + hist_rotulo["ID"].astype(str) + " \u2014 " + hist_rotulo["Tipo"] + " \u2014 "
             + hist_rotulo["Clube A"] + " x " + hist_rotulo["Clube B"] + " (" + hist_rotulo["Data"] + ")"
         )
-        rotulo_sel = st.selectbox("Escolha a negocia\u00e7\u00e3o", hist_rotulo["rotulo"])
-        negociacao_id = int(hist_rotulo.loc[hist_rotulo["rotulo"] == rotulo_sel, "ID"].iloc[0])
-        st.dataframe(detalhes_negociacao(negociacao_id), use_container_width=True)
+        rotulo_sel = st.selectbox("Escolha a negocia\u00e7\u00e3o", hist_rotulo["rotulo"], key="detalhe_negociacao_sel")
+        negociacao_id_detalhe = int(hist_rotulo.loc[hist_rotulo["rotulo"] == rotulo_sel, "ID"].iloc[0])
+        st.dataframe(detalhes_negociacao(negociacao_id_detalhe), use_container_width=True)
+
+    if eh_admin():
+        with st.expander("\u21a9\ufe0f Anular uma negocia\u00e7\u00e3o"):
+            hist_ativas = hist[hist["Status"] == "ativa"].copy()
+            if hist_ativas.empty:
+                st.caption("Nenhuma negocia\u00e7\u00e3o ativa para anular (todas j\u00e1 foram canceladas).")
+            else:
+                hist_ativas["rotulo"] = (
+                    "#" + hist_ativas["ID"].astype(str) + " \u2014 " + hist_ativas["Tipo"] + " \u2014 "
+                    + hist_ativas["Clube A"] + " x " + hist_ativas["Clube B"] + " (" + hist_ativas["Data"] + ")"
+                )
+                rotulo_anular = st.selectbox("Escolha a negocia\u00e7\u00e3o para anular", hist_ativas["rotulo"], key="anular_negociacao_sel")
+                negociacao_id_anular = int(hist_ativas.loc[hist_ativas["rotulo"] == rotulo_anular, "ID"].iloc[0])
+                st.caption("O(s) jogador(es) volta(m) para o clube (e liga) de origem, e qualquer compensa\u00e7\u00e3o em dinheiro \u00e9 estornada.")
+                if st.button("Anular esta negocia\u00e7\u00e3o"):
+                    cancelar_negociacao(negociacao_id_anular)
+                    st.success("Negocia\u00e7\u00e3o anulada.")
+                    st.rerun()
 
 hist_legado = historico_transferencias_legado(liga_id)
 if not hist_legado.empty:
