@@ -14,7 +14,7 @@ from core.state import selecionar_liga_ativa
 
 liga_id, liga_nome = selecionar_liga_ativa()
 st.header(f"\U0001F504 Transfer\u00eancias \u2014 {liga_nome}")
-
+st.warning("🧪 TESTE DE VERSÃO — CARIMBO 001")
 
 def _opcoes_clube(entre_ligas):
     """Retorna (lista_de_rotulos, dict rotulo->id, dict rotulo->liga_id)."""
