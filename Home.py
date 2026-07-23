@@ -35,9 +35,7 @@ st.markdown(
     /* Esconde o menu "⋮" padrão do Streamlit e o rodapé "Made with Streamlit".
        Não esconde o <header> inteiro de propósito: ele contém o botão ☰ que
        abre a sidebar no celular — escondê-lo quebraria a navegação mobile. */
-    #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    [data-testid="stToolbar"] {visibility: hidden !important;}
     [data-testid="stDecoration"] {visibility: hidden !important;}
     </style>
     """,
